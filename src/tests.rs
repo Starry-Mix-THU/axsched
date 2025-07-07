@@ -3,6 +3,7 @@ macro_rules! def_test_sched {
         mod $name {
             use crate::*;
             use alloc::sync::Arc;
+            use core::ops::Deref;
 
             #[test]
             fn test_sched() {
@@ -15,7 +16,7 @@ macro_rules! def_test_sched {
 
                 for i in 0..NUM_TASKS * 10 - 1 {
                     let next = scheduler.pick_next_task().unwrap();
-                    assert_eq!(*next.inner(), i % NUM_TASKS);
+                    assert_eq!(**next.deref(), i % NUM_TASKS);
                     // pass a tick to ensure the order of tasks
                     scheduler.task_tick(&next);
                     scheduler.put_prev_task(next, false);
@@ -66,7 +67,7 @@ macro_rules! def_test_sched {
                 let t0 = std::time::Instant::now();
                 for i in (0..NUM_TASKS).rev() {
                     let t = scheduler.remove_task(&tasks[i]).unwrap();
-                    assert_eq!(*t.inner(), i);
+                    assert_eq!(**t.deref(), i);
                 }
                 let t1 = std::time::Instant::now();
                 println!(

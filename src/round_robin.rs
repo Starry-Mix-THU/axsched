@@ -1,6 +1,14 @@
-use alloc::{collections::VecDeque, sync::Arc};
-use core::ops::Deref;
-use core::sync::atomic::{AtomicIsize, Ordering};
+use core::{
+    ops::Deref,
+    sync::atomic::{AtomicIsize, Ordering},
+};
+
+use alloc::sync::Arc;
+
+use intrusive_collections::{
+    container_of, linked_list::LinkOps, offset_of, Adapter, DefaultLinkOps, DefaultPointerOps,
+    LinkedList, LinkedListAtomicLink, LinkedListLink, PointerOps,
+};
 
 use crate::BaseScheduler;
 
@@ -10,7 +18,61 @@ use crate::BaseScheduler;
 pub struct RRTask<T, const MAX_TIME_SLICE: usize> {
     inner: T,
     time_slice: AtomicIsize,
+    link: LinkedListAtomicLink,
 }
+
+// Copied from `intrusive_collections::intrusive_adapter` macro since it doesn't
+// support const generics yet.
+
+struct NodeAdapter<T, const MAX_TIME_SLICE: usize> {
+    link_ops: LinkOps,
+    pointer_ops: DefaultPointerOps<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+}
+
+unsafe impl<T, const MAX_TIME_SLICE: usize> Send for NodeAdapter<T, MAX_TIME_SLICE> {}
+unsafe impl<T, const MAX_TIME_SLICE: usize> Sync for NodeAdapter<T, MAX_TIME_SLICE> {}
+
+impl<T, const MAX_TIME_SLICE: usize> NodeAdapter<T, MAX_TIME_SLICE> {
+    pub const NEW: Self = NodeAdapter {
+        link_ops: <LinkedListLink as DefaultLinkOps>::NEW,
+        pointer_ops: DefaultPointerOps::new(),
+    };
+}
+unsafe impl<T, const MAX_TIME_SLICE: usize> Adapter for NodeAdapter<T, MAX_TIME_SLICE> {
+    type LinkOps = LinkOps;
+    type PointerOps = DefaultPointerOps<Arc<RRTask<T, MAX_TIME_SLICE>>>;
+
+    #[inline]
+    unsafe fn get_value(
+        &self,
+        link: <Self::LinkOps as intrusive_collections::LinkOps>::LinkPtr,
+    ) -> *const <Self::PointerOps as PointerOps>::Value {
+        container_of!(link.as_ptr(), RRTask<T, MAX_TIME_SLICE>, link)
+    }
+    #[inline]
+    unsafe fn get_link(
+        &self,
+        value: *const <Self::PointerOps as PointerOps>::Value,
+    ) -> <Self::LinkOps as intrusive_collections::LinkOps>::LinkPtr {
+        let ptr = (value as *const u8).add(offset_of!(RRTask<T, MAX_TIME_SLICE>, link));
+        core::ptr::NonNull::new_unchecked(ptr as *mut _)
+    }
+
+    #[inline]
+    fn link_ops(&self) -> &Self::LinkOps {
+        &self.link_ops
+    }
+    #[inline]
+    fn link_ops_mut(&mut self) -> &mut Self::LinkOps {
+        &mut self.link_ops
+    }
+    #[inline]
+    fn pointer_ops(&self) -> &Self::PointerOps {
+        &self.pointer_ops
+    }
+}
+
+// intrusive_adapter!(NodeAdapter<T, const MAX_TIME_SLICE: usize> = Arc<RRTask<T, MAX_TIME_SLICE>>: RRTask<T, MAX_TIME_SLICE> { link: LinkedListLink });
 
 impl<T, const S: usize> RRTask<T, S> {
     /// Creates a new [`RRTask`] from the inner task struct.
@@ -18,6 +80,7 @@ impl<T, const S: usize> RRTask<T, S> {
         Self {
             inner,
             time_slice: AtomicIsize::new(S as isize),
+            link: LinkedListAtomicLink::new(),
         }
     }
 
@@ -37,7 +100,7 @@ impl<T, const S: usize> RRTask<T, S> {
 
 impl<T, const S: usize> Deref for RRTask<T, S> {
     type Target = T;
-    #[inline]
+
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -56,14 +119,14 @@ impl<T, const S: usize> Deref for RRTask<T, S> {
 /// [Round-Robin]: https://en.wikipedia.org/wiki/Round-robin_scheduling
 /// [`FifoScheduler`]: crate::FifoScheduler
 pub struct RRScheduler<T, const MAX_TIME_SLICE: usize> {
-    ready_queue: VecDeque<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+    ready_queue: LinkedList<NodeAdapter<T, MAX_TIME_SLICE>>,
 }
 
 impl<T, const S: usize> RRScheduler<T, S> {
     /// Creates a new empty [`RRScheduler`].
     pub const fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            ready_queue: LinkedList::new(NodeAdapter::NEW),
         }
     }
     /// get the name of scheduler
@@ -82,11 +145,8 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        // TODO: more efficient
-        self.ready_queue
-            .iter()
-            .position(|t| Arc::ptr_eq(t, task))
-            .and_then(|idx| self.ready_queue.remove(idx))
+        let mut cursor = unsafe { self.ready_queue.cursor_mut_from_ptr(Arc::as_ptr(task)) };
+        cursor.remove()
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {

@@ -1,15 +1,36 @@
+use core::ops::Deref;
+
 use alloc::sync::Arc;
 
-use linked_list_r4l::{def_node, List};
+use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListAtomicLink};
 
 use crate::BaseScheduler;
 
-def_node! {
-    /// A task wrapper for the [`FifoScheduler`].
-    ///
-    /// It add extra states to use in [`linked_list::List`].
-    pub struct FifoTask<T>(T);
+/// A task wrapper for the [`FifoScheduler`].
+///
+/// It add extra states to use in [`linked_list::List`].
+pub struct FifoTask<T> {
+    inner: T,
+    link: LinkedListAtomicLink,
 }
+impl<T> FifoTask<T> {
+    /// Creates a new [`FifoTask`] from the inner task struct.
+    pub const fn new(inner: T) -> Self {
+        Self {
+            inner,
+            link: LinkedListAtomicLink::new(),
+        }
+    }
+}
+impl<T> Deref for FifoTask<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+intrusive_adapter!(NodeAdapter<T> = Arc<FifoTask<T>>: FifoTask<T> { link: LinkedListAtomicLink });
 
 /// A simple FIFO (First-In-First-Out) cooperative scheduler.
 ///
@@ -21,14 +42,14 @@ def_node! {
 ///
 /// It internally uses a linked list as the ready queue.
 pub struct FifoScheduler<T> {
-    ready_queue: List<Arc<FifoTask<T>>>,
+    ready_queue: LinkedList<NodeAdapter<T>>,
 }
 
 impl<T> FifoScheduler<T> {
     /// Creates a new empty [`FifoScheduler`].
     pub const fn new() -> Self {
         Self {
-            ready_queue: List::new(),
+            ready_queue: LinkedList::new(NodeAdapter::NEW),
         }
     }
     /// get the name of scheduler
@@ -47,7 +68,8 @@ impl<T> BaseScheduler for FifoScheduler<T> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        unsafe { self.ready_queue.remove(task) }
+        let mut cursor = unsafe { self.ready_queue.cursor_mut_from_ptr(Arc::as_ptr(task)) };
+        cursor.remove()
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
